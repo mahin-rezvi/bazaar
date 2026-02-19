@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
+    }
+
+    function createdAtUnchangedOrMissing() {
+      return !("createdAt" in resource.data) || request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    // Prevent role escalation from client writes.
+    // - If the existing doc is admin, it must remain admin.
+    // - If the existing doc is not admin (or missing role), client cannot set admin.
+    function roleNotEscalated() {
+      return (("role" in resource.data) && resource.data.role == "admin")
+        ? request.resource.data.role == "admin"
+        : request.resource.data.role != "admin";
+    }
+
+    function isValidProfile(profile) {
+      return profile == null || (
+        profile is map
+          && profile.keys().hasOnly([
+            "phone",
+            "addressLine1",
+            "addressLine2",
+            "city",
+            "country",
+            "postalCode",
+            "notes"
+          ])
+          && (!("phone" in profile) || profile.phone is string)
+          && (!("addressLine1" in profile) || profile.addressLine1 is string)
+          && (!("addressLine2" in profile) || profile.addressLine2 is string)
+          && (!("city" in profile) || profile.city is string)
+          && (!("country" in profile) || profile.country is string)
+          && (!("postalCode" in profile) || profile.postalCode is string)
+          && (!("notes" in profile) || profile.notes is string)
+      );
+    }
+
+    function isValidPrefs(prefs) {
+      return prefs == null || (
+        prefs is map
+          && prefs.keys().hasOnly(["marketingEmail"])
+          && (!("marketingEmail" in prefs) || prefs.marketingEmail is bool)
+      );
+    }
+
+    match /users/{uid} {
+      // User profiles are created client-side after Auth signup.
+      // Prevent role escalation by requiring role == "user" on create.
+      allow create: if isOwner(uid)
+        && request.resource.data.role == "user"
+        && (!("profile" in request.resource.data) || isValidProfile(request.resource.data.profile))
+        && (!("prefs" in request.resource.data) || isValidPrefs(request.resource.data.prefs));
+
+      allow read: if isOwner(uid) || isAdmin();
+
+      allow update: if isOwner(uid)
+        && roleNotEscalated()
+        && createdAtUnchangedOrMissing()
+        && (!("profile" in request.resource.data) || isValidProfile(request.resource.data.profile))
+        && (!("prefs" in request.resource.data) || isValidPrefs(request.resource.data.prefs));
+
+      allow delete: if false;
+    }
+
+    match /products/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /carts/{uid} {
+      allow read, write: if isOwner(uid);
+    }
+
+    match /orders/{id} {
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == "pending";
+
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+
+      // Only admins can update orders (status, fulfillment, etc.).
+      allow update: if isAdmin();
+
+      allow delete: if false;
+    }
+  }
+}

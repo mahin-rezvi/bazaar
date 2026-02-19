@@ -1,0 +1,28 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Public read for marketplace images; owner-only write for their avatar folder.
+    match /user_avatars/{uid}/{allPaths=**} {
+      allow read: if true;
+      allow write: if isOwner(uid)
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    match /products/{allPaths=**} {
+      allow read: if true;
+      // Product image writes should be admin-only in real apps (via Cloud Functions),
+      // but keeping it closed by default in this demo.
+      allow write: if false;
+    }
+  }
+}
+
